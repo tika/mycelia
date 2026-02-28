@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/tika/mycelia/internal/mmap"
 	"github.com/tika/mycelia/internal/parser"
 	"github.com/tika/mycelia/internal/watcher"
 )
@@ -23,16 +24,13 @@ type IndexResult struct {
 type Indexer struct {
 	watcher *watcher.Watcher
 	parser  *parser.Parser
+	mmap    *mmap.Reader
 
-	// results channel emits indexing results
 	results chan IndexResult
-
-	// done signals shutdown
-	done chan struct{}
-	wg   sync.WaitGroup
+	done    chan struct{}
+	wg      sync.WaitGroup
 }
 
-// New creates a new Indexer for the given root path
 func New(rootPath string, watcherConfig watcher.Config) (*Indexer, error) {
 	w, err := watcher.New(rootPath, watcherConfig)
 	if err != nil {
@@ -42,6 +40,7 @@ func New(rootPath string, watcherConfig watcher.Config) (*Indexer, error) {
 	return &Indexer{
 		watcher: w,
 		parser:  parser.New(),
+		mmap:    mmap.NewReader(),
 		results: make(chan IndexResult, 64),
 		done:    make(chan struct{}),
 	}, nil
@@ -64,11 +63,11 @@ func (idx *Indexer) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop shuts down the indexer gracefully
 func (idx *Indexer) Stop() error {
 	close(idx.done)
 	idx.wg.Wait()
 	idx.parser.Close()
+	idx.mmap.Close()
 	return idx.watcher.Stop()
 }
 
@@ -103,6 +102,9 @@ func (idx *Indexer) processBatch(ctx context.Context, batch watcher.BatchedEvent
 	for _, event := range batch.Events {
 		eventType := event.Type.String()
 
+		// Invalidate mmap cache for any file change
+		idx.mmap.Invalidate(event.Path)
+
 		if event.Type == watcher.EventDelete || event.Type == watcher.EventRename {
 			idx.results <- IndexResult{
 				FilePath:  event.Path,
@@ -132,7 +134,16 @@ func (idx *Indexer) processBatch(ctx context.Context, batch watcher.BatchedEvent
 	}
 }
 
-// IndexFile parses a single file on demand
 func (idx *Indexer) IndexFile(ctx context.Context, filePath string) (*parser.ParseResult, error) {
 	return idx.parser.ParseFile(ctx, filePath)
+}
+
+// Returns the raw bytes at [start:end) from the file via mmap
+func (idx *Indexer) ReadSlice(path string, start, end uint) ([]byte, error) {
+	return idx.mmap.Slice(path, start, end)
+}
+
+// Returns the source code for a symbol using its byte offsets
+func (idx *Indexer) ReadSymbol(path string, sym parser.Symbol) (string, error) {
+	return idx.mmap.SliceString(path, sym.StartByte, sym.EndByte)
 }

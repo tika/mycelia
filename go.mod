@@ -15,5 +15,6 @@ require (
 
 require (
 	github.com/mattn/go-pointer v0.0.1 // indirect
+	golang.org/x/exp v0.0.0-20260218203240-3dfff04db8fa // indirect
 	golang.org/x/sys v0.13.0 // indirect
 )
