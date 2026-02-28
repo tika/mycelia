@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tika/mycelia/internal/indexer"
 	"github.com/tika/mycelia/internal/watcher"
 )
 
@@ -29,9 +30,9 @@ func main() {
 	config := watcher.DefaultConfig()
 	config.DebounceDelay = config.DebounceDelay * time.Duration(*debounceMs) / 500
 
-	w, err := watcher.New(*targetPath, config)
+	idx, err := indexer.New(*targetPath, config)
 	if err != nil {
-		log.Fatalf("Failed to create watcher: %v", err)
+		log.Fatalf("Failed to create indexer: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -40,8 +41,8 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	if err := w.Start(ctx); err != nil {
-		log.Fatalf("Failed to start watcher: %v", err)
+	if err := idx.Start(ctx); err != nil {
+		log.Fatalf("Failed to start indexer: %v", err)
 	}
 
 	fmt.Printf("Mycelia indexer watching: %s\n", *targetPath)
@@ -51,26 +52,62 @@ func main() {
 
 	for {
 		select {
-		case batch := <-w.Events():
-			fmt.Printf("=== Batch received at %s (%d events) ===\n",
-				batch.BatchedAt.Format("15:04:05.000"),
-				len(batch.Events))
+		case result := <-idx.Results():
+			if result.Skipped {
+				fmt.Printf("[%s] %s (skipped: unsupported type)\n", result.EventType, result.FilePath)
+				continue
+			}
 
-			for _, event := range batch.Events {
-				fmt.Printf("  [%s] %s @ %s\n",
-					event.Type,
-					event.Path,
-					event.Timestamp.Format("15:04:05.000"))
+			if result.Error != nil {
+				fmt.Printf("[%s] %s: %v\n", result.EventType, result.FilePath, result.Error)
+				continue
+			}
+
+			pr := result.ParseResult
+			fmt.Printf("[%s] %s (%s)\n", result.EventType, pr.FilePath, pr.Language)
+			fmt.Printf("    Hash: %s...\n", pr.Hash[:16])
+
+			if len(pr.Imports) > 0 {
+				fmt.Printf("    Imports (%d):\n", len(pr.Imports))
+				for _, imp := range pr.Imports {
+					if imp.Alias != "" {
+						fmt.Printf("      * as %s from %q [%d:%d]\n",
+							imp.Alias, imp.Source, imp.StartByte, imp.EndByte)
+					} else if len(imp.Names) > 0 {
+						fmt.Printf("      %v from %q [%d:%d]\n",
+							imp.Names, imp.Source, imp.StartByte, imp.EndByte)
+					} else {
+						fmt.Printf("      %q [%d:%d]\n",
+							imp.Source, imp.StartByte, imp.EndByte)
+					}
+				}
+			}
+
+			if len(pr.Symbols) > 0 {
+				fmt.Printf("    Symbols (%d):\n", len(pr.Symbols))
+				for _, sym := range pr.Symbols {
+					exported := ""
+					if sym.IsExported {
+						exported = " (exported)"
+					}
+					fmt.Printf("      %s %s%s [%d:%d] lines %d-%d\n",
+						sym.Kind, sym.Name, exported,
+						sym.StartByte, sym.EndByte,
+						sym.StartLine+1, sym.EndLine+1)
+
+					for _, child := range sym.Children {
+						fmt.Printf("        %s %s [%d:%d]\n",
+							child.Kind, child.Name,
+							child.StartByte, child.EndByte)
+					}
+				}
 			}
 			fmt.Println()
 
-		case err := <-w.Errors():
-			log.Printf("Watcher error: %v", err)
-
 		case <-sigChan:
 			fmt.Println("\nShutting down...")
-			if err := w.Stop(); err != nil {
-				log.Printf("Error stopping watcher: %v", err)
+			if err := idx.Stop(); err != nil {
+				log.Printf("Error stopping indexer: %v", err)
 			}
 			return
 		}
