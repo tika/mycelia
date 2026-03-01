@@ -4,27 +4,38 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/tika/mycelia/internal/indexer"
 	"github.com/tika/mycelia/internal/watcher"
 )
 
+func configureLogger() {
+	zerolog.TimeFieldFormat = time.RFC3339Nano
+	log.Logger = log.Output(zerolog.ConsoleWriter{
+		Out:        os.Stderr,
+		TimeFormat: time.RFC3339,
+	})
+}
+
 func main() {
+	configureLogger()
+
 	targetPath := flag.String("path", ".", "Path to watch for changes")
 	debounceMs := flag.Int("debounce", 500, "Debounce delay in milliseconds")
 	flag.Parse()
 
 	info, err := os.Stat(*targetPath)
 	if err != nil {
-		log.Fatalf("Error: cannot access path %q: %v", *targetPath, err)
+		log.Fatal().Err(err).Str("path", *targetPath).Msg("cannot access watch path")
 	}
 	if !info.IsDir() {
-		log.Fatalf("Error: %q is not a directory", *targetPath)
+		log.Fatal().Str("path", *targetPath).Msg("path is not a directory")
 	}
 
 	config := watcher.DefaultConfig()
@@ -32,7 +43,7 @@ func main() {
 
 	idx, err := indexer.New(*targetPath, config)
 	if err != nil {
-		log.Fatalf("Failed to create indexer: %v", err)
+		log.Fatal().Err(err).Msg("failed to create indexer")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -42,8 +53,13 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	if err := idx.Start(ctx); err != nil {
-		log.Fatalf("Failed to start indexer: %v", err)
+		log.Fatal().Err(err).Msg("failed to start indexer")
 	}
+
+	log.Info().
+		Str("path", *targetPath).
+		Int("debounce_ms", *debounceMs).
+		Msg("mycelia indexer started")
 
 	fmt.Printf("Mycelia indexer watching: %s\n", *targetPath)
 	fmt.Printf("Debounce delay: %dms\n", *debounceMs)
@@ -54,12 +70,20 @@ func main() {
 		select {
 		case result := <-idx.Results():
 			if result.Skipped {
-				fmt.Printf("[%s] %s (skipped: unsupported type)\n", result.EventType, result.FilePath)
+				log.Warn().
+					Str("event_type", result.EventType).
+					Str("file_path", result.FilePath).
+					Str("reason_code", "UNSUPPORTED_FILE_TYPE").
+					Msg("file skipped")
 				continue
 			}
 
 			if result.Error != nil {
-				fmt.Printf("[%s] %s: %v\n", result.EventType, result.FilePath, result.Error)
+				log.Error().
+					Err(result.Error).
+					Str("event_type", result.EventType).
+					Str("file_path", result.FilePath).
+					Msg("indexing failed")
 				continue
 			}
 
@@ -105,9 +129,9 @@ func main() {
 			fmt.Println()
 
 		case <-sigChan:
-			fmt.Println("\nShutting down...")
+			log.Info().Msg("shutting down")
 			if err := idx.Stop(); err != nil {
-				log.Printf("Error stopping indexer: %v", err)
+				log.Error().Err(err).Msg("failed to stop indexer cleanly")
 			}
 			return
 		}
