@@ -3,9 +3,9 @@ package indexer
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 
+	"github.com/rs/zerolog/log"
 	"github.com/tika/mycelia/internal/mmap"
 	"github.com/tika/mycelia/internal/parser"
 	"github.com/tika/mycelia/internal/watcher"
@@ -93,7 +93,10 @@ func (idx *Indexer) processEvents(ctx context.Context) {
 			if !ok {
 				return
 			}
-			log.Printf("Watcher error: %v", err)
+			log.Error().
+				Err(err).
+				Str("reason_code", "WATCHER_ERROR").
+				Msg("watcher error")
 		}
 	}
 }
